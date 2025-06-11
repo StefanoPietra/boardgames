@@ -1,9 +1,10 @@
 #! python3
-# boardgames.py v2.0 - Update board game prices from Zatu and BoardGamePrices,
-# saving and formatting them in a new sheet of the Excel file
+# boardgames.py v3.0 - Update board game prices from Zatu and BoardGamePrices,
+# saving and formatting them in a new sheet of my Excel file
 # v2.0 - check prices from Zatu website too
+# v3.0 - bypass Cloudflare protection on Zatu using urllib and a fake User Agent
 
-import logging, openpyxl, datetime, requests, bs4, re
+import logging, openpyxl, datetime, requests, urllib.request, bs4, re
 from openpyxl.styles import PatternFill, Font
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
@@ -16,6 +17,11 @@ BGPWebsite = "https://boardgameprices.co.uk/item/show/"
 priceRegex = re.compile(r"£(\d+\.\d+)")    # regular expression for prices (£##.##)
 zatuDeliveryFee = 2.99      # added to all Zatu prices
 priceChange = 20  # percentage change over which the price is considered different
+urllibHeader = {"authority": "www.google.com", # trick the web server into thinking the request is from a browser and not a scraper
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "accept-language": "en-US,en;q=0.9",
+                "cache-control": "max-age=0",
+                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"}
 
 def findColumn(header):
     """Return number of the column with the given HEADER"""
@@ -92,50 +98,49 @@ for row in range(1, newSheet.max_row):
 
     logging.info("Getting web page:\n           " + zatuUrl)
     try:    # try to download page
-        zatuRes = requests.get(zatuUrl)
-        zatuRes.raise_for_status()
+        zatuReq = urllib.request.Request(zatuUrl, headers=urllibHeader)
+        zatuRes = urllib.request.urlopen(zatuReq).read()
     except:
         logging.error("Impossible to retrieve page for " + game + " on Zatu")
 
-    if zatuRes.status_code == requests.codes.ok:    # if download worked
-        zatuGamePage = bs4.BeautifulSoup(zatuRes.text, "html.parser")
-        
-        try:    # try to extract prices
-            logging.info("Parsing page to find prices")
-            zatuFullPriceElem = zatuGamePage.select(".zg-single-price-box-was")
-            zatuScontatoPriceElem = zatuGamePage.select(".zg-single-price-box-now")
-            if len(zatuFullPriceElem) < 1:  # in case there is no discount and there is only a "NOW" price
-                zatuFullPriceElem = zatuScontatoPriceElem
-            zatuFullPrice = float(priceRegex.findall(zatuFullPriceElem[0].text)[0])   # transform price into a number
-            logging.info("Full price for " + game + " on Zatu is " + str(round(zatuFullPrice+zatuDeliveryFee,2)))
-            newSheet.cell(row=row, column=zatuFullColumn).value = "=SUM("+str(zatuFullPrice)+"+"+str(zatuDeliveryFee)+")"
-            logging.debug("Comparing price with the previous sheet")
-            fillCell(newSheet.cell(row=row, column=zatuFullColumn), latestSheet.cell(row=row, column=zatuFullColumn))
+    zatuGamePage = bs4.BeautifulSoup(zatuRes, "html.parser")
+    
+    try:    # try to extract prices
+        logging.info("Parsing page to find prices")
+        zatuFullPriceElem = zatuGamePage.select(".zg-single-price-box-was")
+        zatuScontatoPriceElem = zatuGamePage.select(".zg-single-price-box-now")
+        if len(zatuFullPriceElem) < 1:  # in case there is no discount and there is only a "NOW" price
+            zatuFullPriceElem = zatuScontatoPriceElem
+        zatuFullPrice = float(priceRegex.findall(zatuFullPriceElem[0].text)[0])   # transform price into a number
+        logging.info("Full price for " + game + " on Zatu is " + str(round(zatuFullPrice+zatuDeliveryFee,2)))
+        newSheet.cell(row=row, column=zatuFullColumn).value = "=SUM("+str(zatuFullPrice)+"+"+str(zatuDeliveryFee)+")"
+        logging.debug("Comparing price with the previous sheet")
+        fillCell(newSheet.cell(row=row, column=zatuFullColumn), latestSheet.cell(row=row, column=zatuFullColumn))
 
-            zatuScontatoPrice = float(priceRegex.findall(zatuScontatoPriceElem[0].text)[0])     # transform price into a number
-            logging.info("Scontato price for " + game + " on Zatu is " + str(round(zatuScontatoPrice+zatuDeliveryFee,2)))
-            newSheet.cell(row=row, column=zatuScontatoColumn).value = "=SUM("+str(zatuScontatoPrice)+"+"+str(zatuDeliveryFee)+")"
-            logging.debug("Comparing price with the previous sheet")
-            fillCell(newSheet.cell(row=row, column=zatuScontatoColumn), latestSheet.cell(row=row, column=zatuScontatoColumn))
-        except:
-            logging.error("Impossible to extract prices for " + game + " on Zatu")
-     
-        try:    # try to check availability
-            logging.info("Checking availability")   # based on text on the orange button
-            zatuAvailabilityElem = zatuGamePage.select("button")
-            zatuAvailability = zatuAvailabilityElem[4].text
-            logging.debug(zatuAvailability)
-            if zatuAvailability == "Add to basket":
-                newSheet.cell(row=row, column=zatuFullColumn).font = Font(color="000000")
-                newSheet.cell(row=row, column=zatuScontatoColumn).font = Font(color="000000")
-            elif zatuAvailability == "Notify Me" or zatuAvailability == "Place Backorder":
-                logging.info(game + " is NOT available on Zatu")
-                newSheet.cell(row=row, column=zatuFullColumn).font = Font(color="FF0000")
-                newSheet.cell(row=row, column=zatuScontatoColumn).font = Font(color="FF0000")
-            else:
-                logging.error("Unexpected availability info for " + game + " on Zatu")
-        except:
-            logging.error("Impossible to retrieve availability info for " + game + " on Zatu")
+        zatuScontatoPrice = float(priceRegex.findall(zatuScontatoPriceElem[0].text)[0])     # transform price into a number
+        logging.info("Scontato price for " + game + " on Zatu is " + str(round(zatuScontatoPrice+zatuDeliveryFee,2)))
+        newSheet.cell(row=row, column=zatuScontatoColumn).value = "=SUM("+str(zatuScontatoPrice)+"+"+str(zatuDeliveryFee)+")"
+        logging.debug("Comparing price with the previous sheet")
+        fillCell(newSheet.cell(row=row, column=zatuScontatoColumn), latestSheet.cell(row=row, column=zatuScontatoColumn))
+    except:
+        logging.error("Impossible to extract prices for " + game + " on Zatu")
+    
+    try:    # try to check availability
+        logging.info("Checking availability")   # based on text on the orange button
+        zatuAvailabilityElem = zatuGamePage.select("button")
+        zatuAvailability = zatuAvailabilityElem[4].text
+        logging.debug(zatuAvailability)
+        if zatuAvailability == "Add to basket":
+            newSheet.cell(row=row, column=zatuFullColumn).font = Font(color="000000")
+            newSheet.cell(row=row, column=zatuScontatoColumn).font = Font(color="000000")
+        elif zatuAvailability == "Notify Me" or zatuAvailability == "Place Backorder":
+            logging.info(game + " is NOT available on Zatu")
+            newSheet.cell(row=row, column=zatuFullColumn).font = Font(color="FF0000")
+            newSheet.cell(row=row, column=zatuScontatoColumn).font = Font(color="FF0000")
+        else:
+            logging.error("Unexpected availability info for " + game + " on Zatu")
+    except:
+        logging.error("Impossible to retrieve availability info for " + game + " on Zatu")
 
     ### Visit BoardGamePrices and scrape the game's price and availability
     logging.debug("Building URL for " + game + " on BoardGamePrices")
